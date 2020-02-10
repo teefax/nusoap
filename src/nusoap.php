@@ -221,6 +221,14 @@ class nusoap_base
         'lt' => '<', 'gt' => '>', 'apos' => "'");
 
     /**
+     * HTTP Content-type to be used for SOAP calls and responses
+     *
+     * @var string
+     */
+    var $contentType = "text/xml";
+
+
+    /**
      * constructor
      *
      * @access    public
@@ -1923,6 +1931,7 @@ class nusoap_xmlschema extends nusoap_base
      */
     function serializeTypeDef($type)
     {
+        $str = '';
         //print "in sTD() for type $type<br>";
         if ($typeDef = $this->getTypeDef($type)) {
             $str .= '<' . $type;
@@ -1960,6 +1969,7 @@ class nusoap_xmlschema extends nusoap_base
      */
     function typeToForm($name, $type)
     {
+        $buffer = '';
         // get typedef
         if ($typeDef = $this->getTypeDef($type)) {
             // if struct
@@ -2539,7 +2549,7 @@ class soap_transport_http extends nusoap_base
                 // recent versions of cURL turn on peer/host checking by default,
                 // while PHP binaries are not compiled with a default location for the
                 // CA cert bundle, so disable peer/host checking.
-                //$this->setCurlOption(CURLOPT_CAINFO, 'f:\php-4.3.2-win32\extensions\curl-ca-bundle.crt');		
+                //$this->setCurlOption(CURLOPT_CAINFO, 'f:\php-4.3.2-win32\extensions\curl-ca-bundle.crt');
                 $this->setCurlOption(CURLOPT_SSL_VERIFYPEER, 0);
                 $this->setCurlOption(CURLOPT_SSL_VERIFYHOST, 0);
 
@@ -3200,7 +3210,11 @@ class soap_transport_http extends nusoap_base
                 $err = 'cURL ERROR: ' . curl_errno($this->ch) . ': ' . $cErr . '<br>';
                 // TODO: there is a PHP bug that can cause this to SEGV for CURLINFO_CONTENT_TYPE
                 foreach (curl_getinfo($this->ch) as $k => $v) {
-                    $err .= "$k: $v<br>";
+                    if (is_array($v)) {
+                        $this->debug("$k: " . json_encode($v));
+                    } else {
+                        $this->debug("$k: $v<br>");
+                    }
                 }
                 $this->debug($err);
                 $this->setError($err);
@@ -3943,8 +3957,13 @@ class nusoap_server extends nusoap_base
                     }
                 }
                 $this->headers[$k] = $v;
-                $this->request .= "$k: $v\r\n";
-                $this->debug("$k: $v");
+                if (is_array($v)) {
+                    $this->request .= "$k: " . json_encode($v) . "\r\n";
+                    $this->debug("$k: " . json_encode($v));
+                } else {
+                    $this->request .= "$k: $v\r\n";
+                    $this->debug("$k: $v");
+                }
             }
         } elseif (is_array($HTTP_SERVER_VARS)) {
             $this->debug("In parse_http_headers, use HTTP_SERVER_VARS");
@@ -4246,6 +4265,7 @@ class nusoap_server extends nusoap_base
                     //}
                     $opParams = array($this->methodreturn);
                 }
+                $opParams = isset($opParams) ? $opParams : [];
                 $return_val = $this->wsdl->serializeRPCParameters($this->methodname, 'output', $opParams);
                 $this->appendDebug($this->wsdl->getDebug());
                 $this->wsdl->clearDebug();
@@ -4426,11 +4446,11 @@ class nusoap_server extends nusoap_base
         $this->debug('Entering parseRequest() for data of length ' . strlen($data) . ' headers:');
         $this->appendDebug($this->varDump($headers));
         if (!isset($headers['content-type'])) {
-            $this->setError('Request not of type text/xml (no content-type header)');
+            $this->setError('Request not of type '.$this->contentType.' (no content-type header)');
             return false;
         }
-        if (!strstr($headers['content-type'], 'text/xml')) {
-            $this->setError('Request not of type text/xml');
+        if (!strstr($headers['content-type'], $this->contentType)) {
+            $this->setError('Request not of type '.$this->contentType.': ' . $headers['content-type']);
             return false;
         }
         if (strpos($headers['content-type'], '=')) {
@@ -4817,7 +4837,7 @@ class wsdl extends nusoap_base
                     $wsdlparts = parse_url($this->wsdl);    // this is bogusly simple!
                     foreach ($xs->imports as $ns2 => $list2) {
                         for ($ii = 0; $ii < count($list2); $ii++) {
-                            if (!$list2[$ii]['loaded']) {
+                            if (array_key_exists($ii, $list2) && !isset($list2[$ii]['loaded'])) {
                                 $this->schemas[$ns][$ns2]->imports[$ns2][$ii]['loaded'] = true;
                                 $url = $list2[$ii]['location'];
                                 if ($url != '') {
@@ -6765,16 +6785,25 @@ class nusoap_parser extends nusoap_base
             // Set the element handlers for the parser.
             xml_set_element_handler($this->parser, 'start_element', 'end_element');
             xml_set_character_data_handler($this->parser, 'character_data');
+            $parseErrors = array();
+            $chunkSize = 4096;
+            for($pointer = 0; $pointer < strlen($xml) && empty($parseErrors); $pointer += $chunkSize) {
+            	$xmlString = substr($xml, $pointer, $chunkSize);
+            	if(!xml_parse($this->parser, $xmlString, false)) {
+            		$parseErrors['lineNumber'] = xml_get_current_line_number($this->parser);
+            		$parseErrors['errorString'] = xml_error_string(xml_get_error_code($this->parser));
+            	};
+            }
+            //Tell the script that is the end of the parsing (by setting is_final to TRUE)
+            xml_parse($this->parser, '', true);
 
-            // Parse the XML file.
-            if (!xml_parse($this->parser, $xml, true)) {
-                // Display an error message.
-                $err = sprintf('XML error parsing SOAP payload on line %d: %s',
-                    xml_get_current_line_number($this->parser),
-                    xml_error_string(xml_get_error_code($this->parser)));
-                $this->debug($err);
-                $this->debug("XML payload:\n" . $xml);
-                $this->setError($err);
+            if(!empty($parseErrors)){
+            	// Display an error message.
+            	$err = sprintf('XML error parsing SOAP payload on line %d: %s',
+            			$parseErrors['lineNumber'],
+            			$parseErrors['errorString']);
+            	$this->debug($err);
+            	$this->setError($err);
             } else {
                 $this->debug('in nusoap_parser ctor, message:');
                 $this->appendDebug($this->varDump($this->message));
@@ -7207,6 +7236,7 @@ class nusoap_parser extends nusoap_base
         $this->debug('in buildVal() for ' . $this->message[$pos]['name'] . "(pos $pos) of type " . $this->message[$pos]['type']);
         // if there are children...
         if ($this->message[$pos]['children'] != '') {
+            $params = [];
             $this->debug('in buildVal, there are children');
             $children = explode('|', $this->message[$pos]['children']);
             array_shift($children); // knock off empty
@@ -7553,7 +7583,7 @@ class nusoap_client extends nusoap_base
             // no WSDL
             //$this->namespaces['ns1'] = $namespace;
             $nsPrefix = 'ns' . rand(1000, 9999);
-            // serialize 
+            // serialize
             $payload = '';
             if (is_string($params)) {
                 $this->debug("serializing param string for operation $operation");
@@ -7822,11 +7852,11 @@ class nusoap_client extends nusoap_base
         $this->debug('Entering parseResponse() for data of length ' . strlen($data) . ' headers:');
         $this->appendDebug($this->varDump($headers));
         if (!isset($headers['content-type'])) {
-            $this->setError('Response not of type text/xml (no content-type header)');
+            $this->setError('Response not of type '.$this->contentType.' (no content-type header)');
             return false;
         }
-        if (!strstr($headers['content-type'], 'text/xml')) {
-            $this->setError('Response not of type text/xml: ' . $headers['content-type']);
+        if (!strstr($headers['content-type'], $this->contentType)) {
+            $this->setError('Response not of type '.$this->contentType.': ' . $headers['content-type']);
             return false;
         }
         if (strpos($headers['content-type'], '=')) {
@@ -8175,7 +8205,17 @@ class nusoap_client extends nusoap_base
      */
     function getHTTPContentType()
     {
-        return 'text/xml';
+        return $this->contentType;
+    }
+
+    /**
+     * allows you to change the HTTP ContentType of the request.
+     *
+     * @param   string $contentTypeNew
+     * @return  void
+     */
+    function setHTTPContentType($contentTypeNew = "text/xml"){
+        $this->contentType = $contentTypeNew;
     }
 
     /**
@@ -8340,4 +8380,204 @@ if (!extension_loaded('soap')) {
     class soapclient extends nusoap_client
     {
     }
+}
+
+/**
+ * caches instances of the wsdl class
+ *
+ * @author   Scott Nichol <snichol@users.sourceforge.net>
+ * @author	Ingo Fischer <ingo@apollon.de>
+ * @version  $Id: class.wsdlcache.php,v 1.7 2007/04/17 16:34:03 snichol Exp $
+ * @access public
+ */
+class nusoap_wsdlcache {
+    /**
+     *	@var resource
+     *	@access private
+     */
+    var $fplock;
+    /**
+     *	@var integer
+     *	@access private
+     */
+    var $cache_lifetime;
+    /**
+     *	@var string
+     *	@access private
+     */
+    var $cache_dir;
+    /**
+     *	@var string
+     *	@access public
+     */
+    var $debug_str = '';
+
+    /**
+     * constructor
+     *
+     * @param string $cache_dir directory for cache-files
+     * @param integer $cache_lifetime lifetime for caching-files in seconds or 0 for unlimited
+     * @access public
+     */
+    function __construct($cache_dir='.', $cache_lifetime=0) {
+        $this->fplock = array();
+        $this->cache_dir = $cache_dir != '' ? $cache_dir : '.';
+        $this->cache_lifetime = $cache_lifetime;
+    }
+
+    /**
+     * creates the filename used to cache a wsdl instance
+     *
+     * @param string $wsdl The URL of the wsdl instance
+     * @return string The filename used to cache the instance
+     * @access private
+     */
+    function createFilename($wsdl) {
+        return $this->cache_dir.'/wsdlcache-' . md5($wsdl);
+    }
+
+    /**
+     * adds debug data to the class level debug string
+     *
+     * @param    string $string debug data
+     * @access   private
+     */
+    function debug($string){
+        $this->debug_str .= get_class($this).": $string\n";
+    }
+
+    /**
+     * gets a wsdl instance from the cache
+     *
+     * @param string $wsdl The URL of the wsdl instance
+     * @return object wsdl The cached wsdl instance, null if the instance is not in the cache
+     * @access public
+     */
+    function get($wsdl) {
+        $filename = $this->createFilename($wsdl);
+        if ($this->obtainMutex($filename, "r")) {
+            // check for expired WSDL that must be removed from the cache
+            if ($this->cache_lifetime > 0) {
+                if (file_exists($filename) && (time() - filemtime($filename) > $this->cache_lifetime)) {
+                    unlink($filename);
+                    $this->debug("Expired $wsdl ($filename) from cache");
+                    $this->releaseMutex($filename);
+                    return null;
+                }
+            }
+            // see what there is to return
+            if (!file_exists($filename)) {
+                $this->debug("$wsdl ($filename) not in cache (1)");
+                $this->releaseMutex($filename);
+                return null;
+            }
+            $fp = @fopen($filename, "r");
+            if ($fp) {
+                $s = implode("", @file($filename));
+                fclose($fp);
+                $this->debug("Got $wsdl ($filename) from cache");
+            } else {
+                $s = null;
+                $this->debug("$wsdl ($filename) not in cache (2)");
+            }
+            $this->releaseMutex($filename);
+            return (!is_null($s)) ? unserialize($s) : null;
+        } else {
+            $this->debug("Unable to obtain mutex for $filename in get");
+        }
+        return null;
+    }
+
+    /**
+     * obtains the local mutex
+     *
+     * @param string $filename The Filename of the Cache to lock
+     * @param string $mode The open-mode ("r" or "w") or the file - affects lock-mode
+     * @return boolean Lock successfully obtained ?!
+     * @access private
+     */
+    function obtainMutex($filename, $mode) {
+        if (isset($this->fplock[md5($filename)])) {
+            $this->debug("Lock for $filename already exists");
+            return false;
+        }
+        $this->fplock[md5($filename)] = fopen($filename.".lock", "w");
+        if ($mode == "r") {
+            return flock($this->fplock[md5($filename)], LOCK_SH);
+        } else {
+            return flock($this->fplock[md5($filename)], LOCK_EX);
+        }
+    }
+
+    /**
+     * adds a wsdl instance to the cache
+     *
+     * @param object wsdl $wsdl_instance The wsdl instance to add
+     * @return boolean WSDL successfully cached
+     * @access public
+     */
+    function put($wsdl_instance) {
+        $filename = $this->createFilename($wsdl_instance->wsdl);
+        $s = serialize($wsdl_instance);
+        if ($this->obtainMutex($filename, "w")) {
+            $fp = fopen($filename, "w");
+            if (! $fp) {
+                $this->debug("Cannot write $wsdl_instance->wsdl ($filename) in cache");
+                $this->releaseMutex($filename);
+                return false;
+            }
+            fputs($fp, $s);
+            fclose($fp);
+            $this->debug("Put $wsdl_instance->wsdl ($filename) in cache");
+            $this->releaseMutex($filename);
+            return true;
+        } else {
+            $this->debug("Unable to obtain mutex for $filename in put");
+        }
+        return false;
+    }
+
+    /**
+     * releases the local mutex
+     *
+     * @param string $filename The Filename of the Cache to lock
+     * @return boolean Lock successfully released
+     * @access private
+     */
+    function releaseMutex($filename) {
+        $ret = flock($this->fplock[md5($filename)], LOCK_UN);
+        fclose($this->fplock[md5($filename)]);
+        unset($this->fplock[md5($filename)]);
+        if (! $ret) {
+            $this->debug("Not able to release lock for $filename");
+        }
+        return $ret;
+    }
+
+    /**
+     * removes a wsdl instance from the cache
+     *
+     * @param string $wsdl The URL of the wsdl instance
+     * @return boolean Whether there was an instance to remove
+     * @access public
+     */
+    function remove($wsdl) {
+        $filename = $this->createFilename($wsdl);
+        if (!file_exists($filename)) {
+            $this->debug("$wsdl ($filename) not in cache to be removed");
+            return false;
+        }
+        // ignore errors obtaining mutex
+        $this->obtainMutex($filename, "w");
+        $ret = unlink($filename);
+        $this->debug("Removed ($ret) $wsdl ($filename) from cache");
+        $this->releaseMutex($filename);
+        return $ret;
+    }
+}
+
+/**
+ * For backward compatibility
+ */
+class wsdlcache extends nusoap_wsdlcache {
 }
